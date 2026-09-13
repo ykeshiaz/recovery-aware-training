@@ -1,0 +1,246 @@
+// Prisma schema for the recovery-aware training backend.
+//
+// A note on naming: Prisma model/field names are camelCase by convention
+// (matching the TS types the client generates), but the underlying Postgres
+// tables and columns use the snake_case names from the product spec via
+// @@map / @map. So `DailyCheckIn.userId` in code is the `user_id` column
+// in the `daily_check_ins` table.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  client
+  trainer
+}
+
+// The three wearable data sources the mobile app's HealthProvider
+// implementations report through (see HealthProvider.ts / Workout.source).
+enum ActivitySource {
+  apple_health
+  health_connect
+  garmin
+}
+
+// Mirrors QUADRANT_META's keys in the .jsx prototype exactly -- keep these
+// in sync with readinessScoring.ts, not just this schema.
+enum Quadrant {
+  aligned_ready
+  aligned_fatigued
+  physical_only
+  mental_only
+}
+
+// Only one trigger exists today (the rolling 7-day roster flag), but this
+// is an enum rather than a plain string so future trigger types stay
+// constrained at the DB level instead of drifting into free text.
+enum AlertTriggerType {
+  rolling_7day_flag
+}
+
+enum GarminConnectionStatus {
+  pending // widget session created, user hasn't finished Terra's OAuth flow yet
+  connected
+  disconnected
+  error
+}
+
+model User {
+  id           String @id @default(cuid())
+  email        String @unique
+  passwordHash String @map("password_hash")
+  name         String
+  role         Role
+  timezone     String @default("UTC")
+
+  // Self-relation: a client belongs to at most one trainer. This is a
+  // simplification -- if you later need a client to have multiple trainers
+  // (e.g. a gym with a coaching team), this becomes a join table instead.
+  trainerId String? @map("trainer_id")
+  trainer   User?   @relation("TrainerClients", fields: [trainerId], references: [id])
+  clients   User[]  @relation("TrainerClients")
+
+  checkIns              DailyCheckIn[]
+  biometricSnapshots    BiometricSnapshot[]
+  readinessComputations ReadinessComputation[]
+  dailyActivity         DailyActivity[]
+  workouts              Workout[]
+  garminConnection      GarminConnection?
+
+  alertsAsTrainer CoachAlert[] @relation("AlertsForTrainer")
+  alertsAsClient  CoachAlert[] @relation("AlertsForClient")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([trainerId])
+  @@map("users")
+}
+
+// One subjective check-in per user per day.
+model DailyCheckIn {
+  id     String   @id @default(cuid())
+  userId String   @map("user_id")
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date   DateTime @db.Date
+
+  // All four on the prototype's 1-5 scale.
+  mood       Int
+  motivation Int
+  stress     Int
+  soreness   Int
+  note       String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // A user can only check in once per calendar day; POST /check-ins
+  // upserts on this constraint so a same-day resubmission edits today's
+  // answers rather than creating a duplicate row.
+  @@unique([userId, date])
+  @@map("daily_check_ins")
+}
+
+// The canonical daily biometric reading used specifically as INPUT to the
+// readiness computation (computePhysicalReadiness reads hrv + sleep here).
+// This is deliberately separate from `daily_activity` below: that table
+// mirrors the HealthProvider.DailyActivity shape used by the app's GET
+// endpoints (steps, calories, per-source rows), while this one is the
+// merged/canonical reading readiness scoring trusts for a given day.
+// `sleepScore` isn't used by today's formula but is captured for when the
+// scoring logic grows to use it.
+model BiometricSnapshot {
+  id     String         @id @default(cuid())
+  userId String         @map("user_id")
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date   DateTime       @db.Date
+  source ActivitySource
+
+  hrvMs            Float? @map("hrv_ms")
+  restingHr        Int?   @map("resting_hr")
+  sleepDurationMin Int?   @map("sleep_duration_min")
+  sleepScore       Int?   @map("sleep_score")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, date, source])
+  @@index([userId, date])
+  @@map("biometric_snapshots")
+}
+
+// One computed readiness result per user per day -- cached so
+// GET /users/:id/readiness doesn't recompute on every call, and so the
+// trainer roster's 7-day window can query history cheaply.
+model ReadinessComputation {
+  id     String   @id @default(cuid())
+  userId String   @map("user_id")
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date   DateTime @db.Date
+
+  physicalReadinessScore   Int      @map("physical_readiness_score")
+  subjectiveReadinessScore Int      @map("subjective_readiness_score")
+  quadrant                 Quadrant
+  recommendation           String
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("readiness_computations")
+}
+
+// Matches HealthProvider.ts's DailyActivity shape. One row per
+// (user, date, source) -- e.g. a user with both an Apple Watch and Garmin
+// connected gets two rows for the same date, one per source. Merging across
+// sources (mergeDailyActivity's "prefer whichever has more complete data")
+// happens client-side in the app / HealthProviderRegistry, not here, so
+// this table stays a faithful per-source record of what each provider sent.
+model DailyActivity {
+  id     String         @id @default(cuid())
+  userId String         @map("user_id")
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date   DateTime       @db.Date
+  source ActivitySource
+
+  steps            Int
+  activeCalories   Int?   @map("active_calories")
+  restingHeartRate Int?   @map("resting_heart_rate")
+  hrvMs            Float? @map("hrv_ms")
+  sleepMinutes     Int?   @map("sleep_minutes")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, date, source])
+  @@index([userId, date])
+  @@map("daily_activity")
+}
+
+// Matches HealthProvider.ts's Workout shape.
+model Workout {
+  id     String         @id @default(cuid())
+  userId String         @map("user_id")
+  user   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  source ActivitySource
+  type   String
+
+  startedAt       DateTime @map("started_at")
+  durationMinutes Int      @map("duration_minutes")
+  calories        Int?
+  avgHeartRate    Int?     @map("avg_heart_rate")
+  distanceMeters  Float?   @map("distance_meters")
+
+  // The provider's own workout id (HealthKit sample id, Health Connect
+  // session id, or Terra's workout id for Garmin). Not required for the
+  // on-device providers, which generate their own ids client-side before
+  // ever calling this API, but the Terra webhook needs a stable key to
+  // upsert on so a retried delivery doesn't create a duplicate workout.
+  externalId String? @map("external_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, source, externalId])
+  @@index([userId, startedAt])
+  @@map("workouts")
+}
+
+// A flag raised for a trainer about a client, per the rolling 7-day
+// threshold in TrainerDashboard (3+ mental_only/aligned_fatigued days).
+model CoachAlert {
+  id          String           @id @default(cuid())
+  trainerId   String           @map("trainer_id")
+  trainer     User             @relation("AlertsForTrainer", fields: [trainerId], references: [id], onDelete: Cascade)
+  clientId    String           @map("client_id")
+  client      User             @relation("AlertsForClient", fields: [clientId], references: [id], onDelete: Cascade)
+  triggerType AlertTriggerType @map("trigger_type")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  resolved    Boolean          @default(false)
+
+  @@index([trainerId, resolved])
+  @@map("coach_alerts")
+}
+
+// Maps a Terra-connected user back to our internal user id. One row per
+// user who has started (or completed) connecting Garmin via Terra's widget.
+model GarminConnection {
+  id          String                 @id @default(cuid())
+  userId      String                 @unique @map("user_id")
+  user        User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Null until Terra's widget redirect / webhook confirms the connection --
+  // we know our own userId immediately (we generate it as the `reference_id`
+  // for the widget session), but Terra's own user id only shows up once
+  // they've actually completed the OAuth flow.
+  terraUserId String?                @unique @map("terra_user_id")
+  connectedAt DateTime?              @map("connected_at")
+  status      GarminConnectionStatus @default(pending)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("garmin_connections")
+}
