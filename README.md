@@ -153,6 +153,56 @@ lost on restart); that's an intentional simplification for now, with a
 comment in that file about upgrading to a real queue (e.g. BullMQ + Redis)
 if it becomes a reliability problem later.
 
+## Seeding test data
+
+There's no real wearable to sync from in development, and no mobile app
+yet either, so getting biometric/activity data into the database for
+testing means one of two things:
+
+**"Apple Watch"-shaped data** -- there's no API endpoint for this today
+(the on-device HealthKit/Health Connect providers push to the backend
+from the *mobile app*, which is future React Native work, out of scope
+here), so it has to go straight into the database. `scripts/seed.ts`
+does that for you instead of hand-writing SQL or clicking through Prisma
+Studio one row at a time:
+
+```bash
+npm run seed -- <userId> [days=14] [source=apple_health]
+```
+
+Find a client's `userId` from the web app (shown on the trainer signup
+confirmation for a trainer, or via `localStorage.getItem("recovery-aware-auth")`
+in the browser console while logged in as that client), or just browse
+for it with `npm run prisma:studio`. This generates `days` of trailing
+`biometric_snapshots` + `daily_activity` rows with a wandering HRV/sleep
+baseline (similar spirit to `generateHistory()` in the original .jsx
+prototype), plus one sample workout, so the readiness computation, 14-day
+trend chart, and roster all have something real to show.
+
+**"Garmin"-shaped data** -- since that arrives through a real endpoint
+(the Terra webhook), it's worth testing via the actual pipeline instead
+of bypassing it:
+
+```bash
+curl -X POST http://localhost:3000/webhooks/terra \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "daily",
+    "user": { "user_id": "terra-test-1", "reference_id": "<userId>" },
+    "data": [{
+      "metadata": { "summary_date": "'"$(date +%F)"'" },
+      "distance_data": { "summary": { "steps": 8000 } },
+      "heart_rate_data": { "summary": { "resting_hr_bpm": 55, "avg_hrv_rmssd": 60 } }
+    }]
+  }'
+```
+
+That `<userId>` needs a corresponding `garmin_connections` row first --
+either call `POST /integrations/garmin/connect-url` as that user once (it
+creates one in `pending` status), or insert one directly via Prisma
+Studio. See "Garmin via Terra" above for what other `type` values
+(`auth`, `sleep`, `activity`, `deauth`) do.
+
 ## Web app (manual testing UI)
 
 `web/` is a small Vite + React app adapted from
@@ -180,8 +230,8 @@ trainer first -- the confirmation screen shows that trainer's id, which you
 then paste into a client's "Trainer ID" field at signup to assign them to
 that trainer. A client's readiness stays in a "check-in saved, waiting on
 data" state until there's biometric data (HRV + sleep) for today in
-`biometric_snapshots` -- easiest way to add some for testing is
-`npm run prisma:studio` from the repo root.
+`biometric_snapshots` -- see "Seeding test data" below for the easiest way
+to add some.
 
 One deliberate change from the original prototype: that app had a manual
 client/trainer toggle, since both views ran off the same local mock data
