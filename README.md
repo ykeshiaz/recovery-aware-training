@@ -10,6 +10,9 @@ files this backend was built to match (readiness math, data shapes,
 Garmin/Terra flow) -- not part of the running service, just the
 source-of-truth this code was ported from.
 
+`web/` is a small React app for manually testing this API end to end in a
+browser before the real React Native app exists -- see "Web app" below.
+
 ## Project structure
 
 ```
@@ -149,6 +152,42 @@ handler can't block on DB writes. This queue is in-memory only (jobs are
 lost on restart); that's an intentional simplification for now, with a
 comment in that file about upgrading to a real queue (e.g. BullMQ + Redis)
 if it becomes a reliability problem later.
+
+## Web app (manual testing UI)
+
+`web/` is a small Vite + React app adapted from
+`reference/recovery_aware_trainer_app.jsx` -- same check-in flow, readiness
+result screen, and trainer dashboard, same visual design, but wired to this
+real API instead of generated mock data. It exists purely so you can click
+through the product end to end in a browser before the React Native app is
+built; it's not part of the deployed service.
+
+To run it alongside the backend:
+
+```bash
+# terminal 1, from the repo root
+npm run dev
+
+# terminal 2
+cd web
+npm install
+cp .env.example .env   # VITE_API_BASE_URL defaults to http://localhost:3000
+npm run dev
+```
+
+Open the URL Vite prints (typically `http://localhost:5173`). Sign up as a
+trainer first -- the confirmation screen shows that trainer's id, which you
+then paste into a client's "Trainer ID" field at signup to assign them to
+that trainer. A client's readiness stays in a "check-in saved, waiting on
+data" state until there's biometric data (HRV + sleep) for today in
+`biometric_snapshots` -- easiest way to add some for testing is
+`npm run prisma:studio` from the repo root.
+
+One deliberate change from the original prototype: that app had a manual
+client/trainer toggle, since both views ran off the same local mock data
+with no real identity behind them. Here, the view is driven by whichever
+role you actually logged in as -- a toggle wouldn't make sense against a
+real backend that enforces who can see what.
 
 ## Deployment (Railway)
 
