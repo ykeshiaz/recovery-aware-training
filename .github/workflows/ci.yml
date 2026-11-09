@@ -1,0 +1,79 @@
+name: CI
+
+# Validates every push and pull request -- no deploy step. Railway
+# deploys straight from the branch it's pointed at (see railway.json);
+# this workflow is purely "does this still work" before code lands.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+
+    # A real Postgres to run `prisma migrate deploy` against -- catches a
+    # broken migration at CI time instead of at the next deploy.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: recovery_aware
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d recovery_aware"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://app:app@localhost:5432/recovery_aware?schema=public
+      JWT_SECRET: ci-test-secret-not-for-production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - run: npm run build
+
+      # Builds the same Dockerfile a dev would run locally via
+      # docker-compose -- catches a broken Dockerfile (e.g. a COPY
+      # ordering mistake) without needing a local Docker install to
+      # notice it.
+      - name: Build Docker image
+        run: docker build -t recovery-aware-training:ci .
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run build

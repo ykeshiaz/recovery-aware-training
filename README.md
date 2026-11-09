@@ -41,7 +41,10 @@ prisma/migrations/              SQL migrations (generated, don't hand-edit)
 
 1. **Postgres.** Point `DATABASE_URL` in `.env` (copy from `.env.example`) at
    a running Postgres instance -- local, Docker, or a free Railway/Supabase
-   instance all work.
+   instance all work. (If you don't already have Postgres running locally,
+   `docker compose up` below is the least painful way to get one -- see
+   "Docker" for why that's worth considering before installing Postgres
+   natively.)
 2. Install dependencies: `npm install` (this also runs `prisma generate`
    via the `postinstall` script).
 3. Apply the schema: `npm run prisma:migrate` (creates the DB tables from
@@ -59,6 +62,64 @@ Other useful scripts:
 - `npm run prisma:studio` — a GUI for browsing/editing the local database.
 - `npm run build` / `npm start` — compiles to `dist/` and runs the compiled
   output, the same way production does.
+
+## Docker
+
+`docker-compose.yml` runs the backend + a Postgres instance together,
+pre-configured to talk to each other -- no native Postgres install, no
+figuring out credentials, no fighting a leftover install from years ago.
+(Relevant backstory: getting a working local Postgres set up without this
+took a genuinely painful back-and-forth earlier -- two competing installs
+on the same machine, a forgotten password, an uninitialized data
+directory. This is the fix for needing to go through that again, here or
+on a fresh machine.)
+
+```bash
+docker compose up --build
+```
+
+That builds the image from `Dockerfile`, starts Postgres, waits for it to
+report healthy, then starts the API -- which runs `prisma migrate deploy`
+on boot (same as `railway.json`'s start command, so this container
+behaves the same way the Railway deployment does) before serving traffic.
+Once it's up:
+
+```bash
+curl http://localhost:3000/health
+```
+
+A few things worth knowing about how this is put together:
+
+- **It's intentionally one simple build stage**, not a trimmed-down
+  multi-stage one -- `devDependencies` (the `prisma` CLI, `typescript`)
+  stay in the final image because `prisma migrate deploy` at container
+  startup needs the `prisma` CLI, which is a devDependency. A
+  size-optimized build is a reasonable later improvement, but it needs
+  care: naively pruning devDependencies breaks that startup migration
+  step.
+- **`web/` isn't included.** This Docker setup covers the backend + its
+  database only; the testing UI still runs with plain `npm run dev` in
+  `web/` (see "Web app" below), pointed at `http://localhost:3000` same
+  as always.
+- **This isn't what Railway deploys from.** Railway builds straight from
+  source via Nixpacks (see `railway.json`), not this Dockerfile. This
+  Docker setup is for local dev parity and for CI (see "CI" below) --
+  not a second deployment path.
+- `docker compose down -v` tears everything down, including the Postgres
+  data volume, if you want a clean slate.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request -- no
+deploy step, it only validates:
+
+- **backend job**: installs dependencies, runs `prisma migrate deploy`
+  against a real (ephemeral) Postgres service container -- catching a
+  broken migration here, not at the next deploy -- then typechecks, runs
+  the unit tests, builds, and builds the Docker image above (catches a
+  broken Dockerfile too, e.g. a COPY ordering mistake, without needing
+  Docker installed locally to notice it).
+- **web job**: installs and builds `web/`.
 
 ## Auth
 

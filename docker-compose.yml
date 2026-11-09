@@ -1,0 +1,46 @@
+# Local dev stack: Postgres + the backend API, so `docker compose up`
+# gives you a working server without installing/configuring Postgres on
+# your own machine (see the README's "Docker" section for the saga that
+# motivated this). Not used for the Railway deployment -- Railway builds
+# straight from source via Nixpacks, not this Dockerfile/compose setup.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: recovery_aware
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d recovery_aware"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Fixed local-dev-only values, not secrets -- matches .env.example.
+      # `db` here is the Postgres service's hostname on the compose
+      # network, not localhost (the two containers aren't on the host's
+      # network namespace).
+      DATABASE_URL: postgresql://app:app@db:5432/recovery_aware?schema=public
+      JWT_SECRET: dev-only-secret-change-me
+      JWT_EXPIRES_IN: 7d
+      PORT: 3000
+      NODE_ENV: development
+      TERRA_MODE: mock
+    ports:
+      - "3000:3000"
+
+volumes:
+  db_data:
